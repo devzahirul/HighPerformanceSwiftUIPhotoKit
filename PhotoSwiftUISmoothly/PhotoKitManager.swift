@@ -68,17 +68,76 @@ class PhotoKitManager: NSObject, ObservableObject, PHPhotoLibraryChangeObserver 
             return 
         }
         
-        print("📸 Triggering limited photo library picker by re-requesting authorization...")
+        print("📸 Presenting limited photo library picker...")
         
-        // The correct way to trigger the "Edit Selected Photos" picker for limited access
-        // is to simply re-request authorization. iOS will automatically show the picker.
-        Task {
-            let status = await PHPhotoLibrary.requestAuthorization(for: .readWrite)
-            await MainActor.run {
-                self.authorizationStatus = status
-                print("📸 Authorization status after picker: \(status.rawValue)")
+        Task { @MainActor in
+            // Get the UIViewController from which to present the picker
+            guard let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+                  let window = windowScene.windows.first,
+                  let rootViewController = window.rootViewController else {
+                print("📸 Could not find root view controller")
+                return
             }
-            // Photos will be automatically reloaded via the PHPhotoLibraryChangeObserver
+            
+            // Find the topmost presented view controller
+            var viewController = rootViewController
+            while let presentedViewController = viewController.presentedViewController {
+                viewController = presentedViewController
+            }
+            
+            print("📸 Using view controller: \(type(of: viewController))")
+            
+            // Use runtime check to call the presentLimitedLibraryPicker method
+            let photoLibrary = PHPhotoLibrary.shared()
+            
+            // Check for iOS 15+ callback version first
+            if #available(iOS 15.0, *) {
+                let callbackSelector = NSSelectorFromString("presentLimitedLibraryPickerFromViewController:completionHandler:")
+                if photoLibrary.responds(to: callbackSelector) {
+                    print("📸 Using iOS 15+ presentLimitedLibraryPicker with callback")
+                    
+                    // Present the limited-library selection user interface with a callback
+                    let methodIMP = photoLibrary.method(for: callbackSelector)
+                    typealias CallbackFunction = @convention(c) (AnyObject, Selector, UIViewController, @escaping ([String]) -> Void) -> Void
+                    let callbackFunction = unsafeBitCast(methodIMP, to: CallbackFunction.self)
+                    
+                    callbackFunction(photoLibrary, callbackSelector, viewController) { identifiers in
+                        Task { @MainActor in
+                            print("📸 Limited library picker callback - newly selected assets: \(identifiers.count)")
+                            for newlySelectedAssetIdentifier in identifiers {
+                                print("📸 Newly selected asset: \(newlySelectedAssetIdentifier)")
+                                // The PHPhotoLibraryChangeObserver will handle the updates
+                            }
+                            // Force reload to ensure we have the latest photos
+                            await self.loadPhotos()
+                        }
+                    }
+                    return
+                }
+            }
+            
+            // Fallback to iOS 14+ basic version
+            let basicSelector = NSSelectorFromString("presentLimitedLibraryPickerFromViewController:")
+            if photoLibrary.responds(to: basicSelector) {
+                print("📸 Using iOS 14+ presentLimitedLibraryPicker (basic)")
+                
+                // Present the limited-library selection user interface
+                photoLibrary.perform(basicSelector, with: viewController)
+            } else {
+                print("📸 presentLimitedLibraryPicker not available, using fallback")
+                // Fallback: re-request authorization
+                await self.fallbackRequestAuthorization()
+            }
+        }
+    }
+    
+    /// Fallback method when presentLimitedLibraryPicker is not available
+    private func fallbackRequestAuthorization() async {
+        print("📸 Using fallback: re-requesting authorization to trigger picker...")
+        let status = await PHPhotoLibrary.requestAuthorization(for: .readWrite)
+        await MainActor.run {
+            self.authorizationStatus = status
+            print("📸 Authorization status after request: \(status.rawValue)")
         }
     }
     
